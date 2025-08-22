@@ -1,0 +1,13 @@
+{
+	"python.defaultInterpreterPath": "${workspaceFolder}\\.venv\\Scripts\\python.exe",
+	// Si tu código vive en /backend, agregalo al path de análisis
+	"python.analysis.extraPaths": [
+		"${workspaceFolder}\\backend"
+	],
+	// Menos ruidoso con stubs faltantes
+	"python.analysis.typeCheckingMode": "basic",
+	"python.analysis.diagnosticSeverityOverrides": {
+		"reportMissingImports": "warning",
+		"reportMissingModuleSource": "warning"
+	}
+}
