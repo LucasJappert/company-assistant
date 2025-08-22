@@ -1,5 +1,7 @@
 import os
 import requests
+import re
+import pandas as pd
 from pathlib import Path
 import numpy as np
 
@@ -28,6 +30,55 @@ from chromadb.config import Settings
 from FlagEmbedding import BGEM3FlagModel
 
 load_dotenv()
+
+# Carga de tablas al iniciar (justo después de crear FastAPI o donde prefieras)
+DATA_DIR = Path(__file__).resolve().parent.parent / "data" / "raw"
+TABLES: dict[str, pd.DataFrame] = {}
+
+
+def load_tables() -> None:
+    for p in DATA_DIR.glob("*.xlsx"):
+        try:
+            # lee la primera hoja; si hay varias y te interesa otra, ajustá sheet_name=
+            df = pd.read_excel(p)
+            # normaliza nombres de columnas para consultas robustas
+            df.columns = [str(c).strip() for c in df.columns]
+            TABLES[p.name.lower()] = df
+        except Exception as e:
+            print(f"[WARN] No pude cargar {p.name}: {e}")
+
+
+load_tables()
+# Heurística muy simple para consultas tabulares típicas (contar / filtrar)
+COUNT_EQ_RE = re.compile(
+    r"(?:cu[aá]nt[oa]s?|cantidad|contar).*?(?P<col>\w+).*?(?:=|igual a)\s*(?P<val>\d+)",
+    flags=re.IGNORECASE,
+)
+
+
+def try_answer_with_tables(query: str) -> str | None:
+    # 1) contar donde Col == valor
+    m = COUNT_EQ_RE.search(query)
+    if m:
+        col = m.group("col")
+        val = m.group("val")
+        # recorre todas las tablas cargadas y suma
+        total = 0
+        hit_tables: list[str] = []
+        for name, df in TABLES.items():
+            if col in df.columns:
+                try:
+                    n = int((df[col] == int(val)).sum())
+                except Exception:
+                    n = int((df[col].astype(str) == val).sum())
+                if n:
+                    total += n
+                    hit_tables.append(name)
+        return f"Hay {total} registro(s) con {col} == {val}. " + (
+            f"(Tablas: {', '.join(hit_tables)})" if hit_tables else ""
+        )
+    return None
+
 
 CHROMA_DIR = os.getenv("CHROMA_DIR", "../chroma_storage")
 CHROMA_PATH = str((Path(__file__).resolve().parent / CHROMA_DIR))
@@ -129,8 +180,47 @@ def call_llm(prompt: str) -> str:
 
 @app.post("/ask", response_model=AskResponse)
 def ask(req: AskRequest):
+    # 1) intento determinista con tablas
+    tab = try_answer_with_tables(req.query)
+    if tab:
+        # devolvé sin LLM, o si querés, combiná con RAG para dar contexto
+        return AskResponse(
+            answer=tab,
+            sources=[],
+        )
+
+    # 2) si no matchea patrón de tablas, seguí con RAG normal
     ctx = retrieve(req.query, req.k)
     prompt = build_prompt(req.query, ctx)
     answer = call_llm(prompt)
     sources_list = [Source(source=c["source"], chunk=c["chunk_idx"]) for c in ctx]
     return AskResponse(answer=answer, sources=sources_list)
+
+
+# FRONT con gradio
+import gradio as gr
+from fastapi import FastAPI
+from fastapi.responses import RedirectResponse
+
+app = FastAPI()
+
+
+def chat(query: str) -> str:
+    # llamada interna a tu función ask
+    from app import retrieve, build_prompt, call_llm
+
+    ctx = retrieve(query, 3)
+    prompt = build_prompt(query, ctx)
+    answer = call_llm(prompt)
+    return answer
+
+
+demo = gr.Interface(fn=chat, inputs="text", outputs="text")
+
+
+@app.get("/")
+async def root():
+    return RedirectResponse(url="/gradio")
+
+
+app = gr.mount_gradio_app(app, demo, path="/gradio")
